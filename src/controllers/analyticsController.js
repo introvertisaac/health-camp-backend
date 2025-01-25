@@ -2,28 +2,69 @@ const Patient = require('../models/Patient');
 
 exports.getDemographics = async (req, res) => {
   try {
-    const demographics = await Patient.aggregate([
-      {
-        $group: {
-          _id: {
-            gender: '$gender',
-            ageGroup: {
-              $switch: {
-                branches: [
-                  { case: { $lte: ['$age', 18] }, then: '0-18' },
-                  { case: { $lte: ['$age', 30] }, then: '19-30' },
-                  { case: { $lte: ['$age', 50] }, then: '31-50' },
-                  { case: { $lte: ['$age', 70] }, then: '51-70' }
-                ],
-                default: '70+'
-              }
+    const { location } = req.query;
+    
+    const pipeline = [];
+    if (location) {
+      pipeline.push({ $match: { location } });
+    }
+    
+    pipeline.push({
+      $group: {
+        _id: {
+          gender: '$gender',
+          ageGroup: {
+            $switch: {
+              branches: [
+                { case: { $lte: ['$age', 18] }, then: '0-18' },
+                { case: { $lte: ['$age', 30] }, then: '19-30' },
+                { case: { $lte: ['$age', 50] }, then: '31-50' },
+                { case: { $lte: ['$age', 70] }, then: '51-70' }
+              ],
+              default: '70+'
             }
-          },
-          count: { $sum: 1 }
-        }
+          }
+        },
+        count: { $sum: 1 }
       }
-    ]);
+    });
+
+    const demographics = await Patient.aggregate(pipeline);
     res.json(demographics);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+exports.getSHAStats = async (req, res) => {
+  try {
+    const { location } = req.query;
+    
+    const pipeline = [];
+    if (location) {
+      pipeline.push({ $match: { location } });
+    }
+    
+    pipeline.push({
+      $group: {
+        _id: '$nhif',
+        count: { $sum: 1 }
+      }
+    });
+
+    const shaStats = await Patient.aggregate(pipeline);
+    const total = shaStats.reduce((sum, stat) => sum + stat.count, 0);
+    
+    const statsWithPercentage = shaStats.map(stat => ({
+      status: stat._id === null ? 'Unrecorded' : stat._id ? 'Covered' : 'Not Covered',
+      count: stat.count,
+      percentage: ((stat.count / total) * 100).toFixed(1) + '%'
+    }));
+
+    res.json({
+      total_patients: total,
+      details: statsWithPercentage
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -45,36 +86,6 @@ exports.getLocationStats = async (req, res) => {
   }
 };
 
-exports.getSHAStats = async (req, res) => {
-    try {
-      const shaStats = await Patient.aggregate([
-        {
-          $group: {
-            _id: '$nhif',
-            count: { $sum: 1 }
-          }
-        }
-      ]);
-      
-      // Calculate total and percentages
-      const total = shaStats.reduce((sum, stat) => sum + stat.count, 0);
-      
-      const statsWithPercentage = shaStats.map(stat => ({
-        status: stat._id === null ? 'Unrecorded' : stat._id ? 'Covered' : 'Not Covered',
-        count: stat.count,
-        percentage: ((stat.count / total) * 100).toFixed(1) + '%'
-      }));
-  
-      const response = {
-        total_patients: total,
-        details: statsWithPercentage
-      };
-  
-      res.json(response);
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  };
 
 exports.getFilteredStats = async (req, res) => {
   try {
