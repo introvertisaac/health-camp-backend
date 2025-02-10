@@ -9,6 +9,7 @@ const patientSchema = new mongoose.Schema({
   occupation: String,
   marital_status: String,
   nhif: Boolean,
+  shif: Boolean,
   medical_conditions: [String],
   triage: {
     height: Number,
