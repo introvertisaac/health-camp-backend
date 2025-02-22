@@ -22,7 +22,7 @@ app.use('/api/analytics', analyticsRoutes);
 // Keep alive mechanism
 const keepAlive = () => {
   setInterval(() => {
-    fetch('https://health-camp-backend.onrender.com/ping')
+    fetch('https://health-camp-backend-htjy.onrender.com/ping')
       .catch(error => console.error('Keep-alive request failed:', error));
   }, 240000); // 4 minutes = 240000 milliseconds
 };
