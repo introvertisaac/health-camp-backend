@@ -436,6 +436,36 @@ exports.getAnalytics = async (req, res) => {
           },
           { $sort: { count: -1 } },
           { $limit: 10 }
+        ],
+
+        // Diagnosis distribution
+        diagnosisDistribution: [
+          {
+            $match: {
+              'general_health.diagnosis': { $exists: true, $ne: null }
+            }
+          },
+          {
+            $project: {
+              diagnoses: {
+                $cond: {
+                  if: { $isArray: "$general_health.diagnosis" },
+                  then: "$general_health.diagnosis",
+                  else: [{ code: "UNKNOWN", name: "$general_health.diagnosis" }]
+                }
+              }
+            }
+          },
+          { $unwind: "$diagnoses" },
+          {
+            $group: {
+              _id: "$diagnoses.name",
+              code: { $first: "$diagnoses.code" },
+              count: { $sum: 1 }
+            }
+          },
+          { $sort: { count: -1 } },
+          { $limit: 10 }
         ]
       }
     });
@@ -486,6 +516,14 @@ exports.getAnalytics = async (req, res) => {
       bmiCategories[_id] = count;
     });
 
+    // Format diagnosis distribution
+    const diagnosisDistribution = result.diagnosisDistribution.map(item => ({
+      name: item._id,
+      code: item.code,
+      count: item.count,
+      percentage: totalRecords > 0 ? ((item.count / totalRecords) * 100).toFixed(1) + '%' : '0%'
+    }));
+
     const response = {
       status: 'success',
       data: {
@@ -526,7 +564,8 @@ exports.getAnalytics = async (req, res) => {
             top_conditions: result.medicalConditions.reduce((acc, { _id, count }) => ({
               ...acc,
               [_id]: count
-            }), {})
+            }), {}),
+            diagnosis_distribution: diagnosisDistribution
           }
         }
       }
@@ -537,7 +576,6 @@ exports.getAnalytics = async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 };
-
 
 exports.getPatients = async (req, res) => {
   try {
@@ -593,7 +631,6 @@ exports.getPatientDetails = async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 };
-
 
 exports.getFirstHundredPatients = async (req, res) => {
   try {
@@ -727,7 +764,6 @@ exports.getLabData = async (req, res) => {
   }
 };
 
-
 exports.getHourlyRegistrations = async (req, res) => {
   try {
     const { location } = req.query;
@@ -768,5 +804,504 @@ exports.getHourlyRegistrations = async (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
+  }
+};
+
+exports.getGeneralHealthAnalytics = async (req, res) => {
+  try {
+    const { location } = req.query;
+    
+    const pipeline = [];
+    
+    // Match stage for location filter
+    if (location) {
+      pipeline.push({ $match: { location } });
+    }
+
+    pipeline.push({
+      $match: {
+        'general_health': { $exists: true, $ne: null }
+      }
+    });
+
+    pipeline.push({
+      $facet: {
+        // Count of patients with general health data
+        totalPatients: [
+          { $count: 'count' }
+        ],
+        
+        // Top diagnoses - handling diagnosis as an array of objects
+        topDiagnoses: [
+          {
+            $match: {
+              'general_health.diagnosis': { $exists: true, $ne: null }
+            }
+          },
+          {
+            $project: {
+              diagnoses: {
+                $cond: {
+                  if: { $isArray: "$general_health.diagnosis" },
+                  then: "$general_health.diagnosis",
+                  else: [{ code: "UNKNOWN", name: "$general_health.diagnosis" }]
+                }
+              }
+            }
+          },
+          { $unwind: "$diagnoses" },
+          {
+            $group: {
+              _id: {
+                code: "$diagnoses.code",
+                name: "$diagnoses.name"
+              },
+              count: { $sum: 1 }
+            }
+          },
+          { $sort: { count: -1 } },
+          { $limit: 10 }
+        ],
+        
+        // Top complaints
+        topComplaints: [
+          {
+            $match: {
+              'general_health.chief_complaint': { $exists: true, $ne: null }
+            }
+          },
+          {
+            $group: {
+              _id: '$general_health.chief_complaint',
+              count: { $sum: 1 }
+            }
+          },
+          { $sort: { count: -1 } },
+          { $limit: 10 }
+        ],
+        
+        // Most common treatments
+        commonTreatments: [
+          {
+            $match: {
+              'general_health.treatment': { $exists: true, $ne: null }
+            }
+          },
+          {
+            $group: {
+              _id: '$general_health.treatment',
+              count: { $sum: 1 }
+            }
+          },
+          { $sort: { count: -1 } },
+          { $limit: 10 }
+        ],
+        
+        // Healthcare providers with most records
+        topProviders: [
+          {
+            $match: {
+              'general_health.userEmail': { $exists: true, $ne: null }
+            }
+          },
+          {
+            $group: {
+              _id: '$general_health.userEmail',
+              count: { $sum: 1 },
+              role: { $first: '$general_health.userRole' }
+            }
+          },
+          { $sort: { count: -1 } },
+          { $limit: 5 }
+        ],
+        
+        // Chief complaints by gender
+        complaintsByGender: [
+          {
+            $match: {
+              'general_health.chief_complaint': { $exists: true, $ne: null },
+              'gender': { $exists: true, $ne: null }
+            }
+          },
+          {
+            $group: {
+              _id: {
+                gender: '$gender',
+                complaint: '$general_health.chief_complaint'
+              },
+              count: { $sum: 1 }
+            }
+          },
+          { $sort: { count: -1 } },
+          { $limit: 20 }
+        ],
+        
+        // Age distribution of patients with general health data
+        ageDistribution: [
+          {
+            $group: {
+              _id: {
+                $switch: {
+                  branches: [
+                    { case: { $lte: ['$age', 18] }, then: '0-18' },
+                    { case: { $lte: ['$age', 30] }, then: '19-30' },
+                    { case: { $lte: ['$age', 50] }, then: '31-50' },
+                    { case: { $lte: ['$age', 70] }, then: '51-70' }
+                  ],
+                  default: '70+'
+                }
+              },
+              count: { $sum: 1 }
+            }
+          }
+        ]
+      }
+    });
+
+    const [result] = await Patient.aggregate(pipeline);
+
+    // Format the results
+    const totalPatientsCount = result.totalPatients[0]?.count || 0;
+    
+    // Format diagnoses - preserving the code and name structure
+    const diagnoses = result.topDiagnoses.map(item => ({
+      diagnosis: {
+        code: item._id.code,
+        name: item._id.name
+      },
+      count: item.count,
+      percentage: ((item.count / totalPatientsCount) * 100).toFixed(1) + '%'
+    }));
+    
+    // Format complaints
+    const complaints = result.topComplaints.map(item => ({
+      complaint: item._id,
+      count: item.count,
+      percentage: ((item.count / totalPatientsCount) * 100).toFixed(1) + '%'
+    }));
+    
+    // Format treatments
+    const treatments = result.commonTreatments.map(item => ({
+      treatment: item._id,
+      count: item.count,
+      percentage: ((item.count / totalPatientsCount) * 100).toFixed(1) + '%'
+    }));
+    
+    // Format providers
+    const providers = result.topProviders.map(item => ({
+      email: item._id,
+      role: item.role,
+      patients_seen: item.count,
+      percentage: ((item.count / totalPatientsCount) * 100).toFixed(1) + '%'
+    }));
+    
+    // Process complaints by gender
+    const complaintsByGender = {
+      male: {},
+      female: {}
+    };
+    
+    result.complaintsByGender.forEach(item => {
+      const gender = item._id.gender.toLowerCase();
+      const complaint = item._id.complaint;
+      
+      if (gender === 'male' || gender === 'female') {
+        if (!complaintsByGender[gender][complaint]) {
+          complaintsByGender[gender][complaint] = 0;
+        }
+        complaintsByGender[gender][complaint] += item.count;
+      }
+    });
+    
+    // Format age distribution
+    const ageDistribution = {};
+    result.ageDistribution.forEach(item => {
+      ageDistribution[item._id] = item.count;
+    });
+
+    const response = {
+      status: 'success',
+      data: {
+        total_patients: totalPatientsCount,
+        location: location || 'All locations',
+        insights: {
+          top_diagnoses: diagnoses,
+          top_complaints: complaints,
+          common_treatments: treatments,
+          demographics: {
+            age_distribution: ageDistribution,
+            complaints_by_gender: complaintsByGender
+          },
+          healthcare_providers: providers
+        }
+      }
+    };
+
+    res.json(response);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+exports.getPatientsByLocation = async (req, res) => {
+  try {
+    const { location, page = 1, limit = 10, sort_by = 'updatedAt', sort_order = 'desc' } = req.query;
+    
+    if (!location) {
+      return res.status(400).json({ error: 'Location parameter is required' });
+    }
+    
+    // Convert limit and page to numbers
+    const limitNum = parseInt(limit);
+    const pageNum = parseInt(page);
+    
+    // Count total patients in this location
+    const totalPatients = await Patient.countDocuments({ location });
+    const totalPages = Math.ceil(totalPatients / limitNum);
+    
+    // Get patients for the specified location with pagination
+    const patients = await Patient.find({ location })
+      .sort({ [sort_by]: sort_order === 'asc' ? 1 : -1 })
+      .skip((pageNum - 1) * limitNum)
+      .limit(limitNum);
+      
+    // Create summary stats
+    const genderCounts = {
+      male: await Patient.countDocuments({ location, gender: { $regex: /^male$/i } }),
+      female: await Patient.countDocuments({ location, gender: { $regex: /^female$/i } })
+    };
+    
+    const ageRanges = {
+      '0-18': await Patient.countDocuments({ location, age: { $lte: 18 } }),
+      '19-30': await Patient.countDocuments({ location, age: { $gt: 18, $lte: 30 } }),
+      '31-50': await Patient.countDocuments({ location, age: { $gt: 30, $lte: 50 } }),
+      '51-70': await Patient.countDocuments({ location, age: { $gt: 50, $lte: 70 } }),
+      '70+': await Patient.countDocuments({ location, age: { $gt: 70 } })
+    };
+    
+    const insuranceCoverage = {
+      covered: await Patient.countDocuments({ 
+        location, 
+        $or: [
+          { nhif: true },
+          { shif: true }
+        ]
+      }),
+      not_covered: await Patient.countDocuments({ 
+        location, 
+        $and: [
+          { $or: [{ nhif: false }, { nhif: { $exists: false } }] },
+          { $or: [{ shif: false }, { shif: { $exists: false } }] }
+        ]
+      })
+    };
+    
+    // Get diagnosis data for this location
+    const diagnosisData = await Patient.aggregate([
+      { $match: { location } },
+      { $match: { 'general_health.diagnosis': { $exists: true, $ne: null } } },
+      {
+        $project: {
+          diagnoses: {
+            $cond: {
+              if: { $isArray: "$general_health.diagnosis" },
+              then: "$general_health.diagnosis",
+              else: [{ code: "UNKNOWN", name: "$general_health.diagnosis" }]
+            }
+          }
+        }
+      },
+      { $unwind: "$diagnoses" },
+      {
+        $group: {
+          _id: {
+            code: "$diagnoses.code",
+            name: "$diagnoses.name"
+          },
+          count: { $sum: 1 }
+        }
+      },
+      { $sort: { count: -1 } },
+      { $limit: 5 }
+    ]);
+    
+    const topDiagnoses = diagnosisData.map(item => ({
+      diagnosis: {
+        code: item._id.code,
+        name: item._id.name
+      },
+      count: item.count,
+      percentage: totalPatients > 0 ? ((item.count / totalPatients) * 100).toFixed(1) + '%' : '0%'
+    }));
+    
+    // Format response
+    const response = {
+      status: 'success',
+      location: location,
+      summary: {
+        total_patients: totalPatients,
+        gender_distribution: genderCounts,
+        age_distribution: ageRanges,
+        insurance_coverage: {
+          covered: insuranceCoverage.covered,
+          not_covered: insuranceCoverage.not_covered,
+          coverage_rate: totalPatients > 0 ? 
+            (insuranceCoverage.covered / totalPatients * 100).toFixed(1) + '%' : '0%'
+        },
+        top_diagnoses: topDiagnoses
+      },
+      data: patients,
+      pagination: {
+        total_patients: totalPatients,
+        total_pages: totalPages,
+        current_page: pageNum,
+        page_size: limitNum,
+        has_next: pageNum < totalPages,
+        has_previous: pageNum > 1
+      }
+    };
+    
+    res.json(response);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+
+exports.searchPatientsByDiagnosis = async (req, res) => {
+  try {
+    const { 
+      query, 
+      limit = 10, 
+      page = 1,
+      location
+    } = req.query;
+    
+    if (!query || query.trim() === '') {
+      return res.status(400).json({ 
+        status: 'error', 
+        message: 'Search query is required' 
+      });
+    }
+    
+    // Prepare match condition
+    const matchCondition = {
+      'general_health.diagnosis': { $exists: true, $ne: null }
+    };
+    
+    // Add location filter if provided
+    if (location) {
+      matchCondition.location = location;
+    }
+    
+    const pipeline = [
+      // Match documents with diagnosis field
+      { $match: matchCondition },
+      
+      // Project to handle different diagnosis field formats
+      {
+        $project: {
+          name: 1,
+          age: 1,
+          gender: 1,
+          patientId: 1,
+          location: 1,
+          updatedAt: 1,
+          diagnoses: {
+            $cond: {
+              if: { $isArray: "$general_health.diagnosis" },
+              then: "$general_health.diagnosis",
+              else: [{ code: "UNKNOWN", name: "$general_health.diagnosis" }]
+            }
+          }
+        }
+      },
+      
+      // Match diagnoses that contain the search query in code or name
+      {
+        $match: {
+          $or: [
+            { "diagnoses.code": { $regex: query, $options: "i" } },
+            { "diagnoses.name": { $regex: query, $options: "i" } }
+          ]
+        }
+      },
+      
+      // Sort by most recent first
+      { $sort: { updatedAt: -1 } },
+      
+      // Facet to handle pagination and metadata
+      {
+        $facet: {
+          metadata: [
+            { $count: "total" },
+            {
+              $addFields: {
+                page: parseInt(page),
+                limit: parseInt(limit),
+                pages: { $ceil: { $divide: ["$total", parseInt(limit)] } }
+              }
+            }
+          ],
+          data: [
+            { $skip: (parseInt(page) - 1) * parseInt(limit) },
+            { $limit: parseInt(limit) }
+          ]
+        }
+      }
+    ];
+    
+    const results = await Patient.aggregate(pipeline);
+    
+    // Format response
+    const metadata = results[0].metadata[0] || { total: 0, page, limit, pages: 0 };
+    const patients = results[0].data;
+    
+    // Calculate common diagnoses among the results
+    const diagnosisCounts = {};
+    patients.forEach(patient => {
+      patient.diagnoses.forEach(diagnosis => {
+        const diagKey = diagnosis.code || diagnosis.name;
+        if (!diagnosisCounts[diagKey]) {
+          diagnosisCounts[diagKey] = {
+            code: diagnosis.code,
+            name: diagnosis.name,
+            count: 0
+          };
+        }
+        diagnosisCounts[diagKey].count += 1;
+      });
+    });
+    
+    // Convert to array and sort by count
+    const commonDiagnoses = Object.values(diagnosisCounts)
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 5);
+    
+    res.json({
+      status: 'success',
+      query: query,
+      metadata: {
+        ...metadata,
+        has_next: metadata.page < metadata.pages,
+        has_previous: metadata.page > 1
+      },
+      common_diagnoses: commonDiagnoses,
+      patients: patients.map(p => ({
+        id: p._id,
+        name: p.name,
+        age: p.age,
+        gender: p.gender,
+        patientId: p.patientId,
+        location: p.location,
+        diagnoses: p.diagnoses,
+        updatedAt: p.updatedAt
+      }))
+    });
+  } catch (error) {
+    res.status(500).json({ 
+      status: 'error', 
+      message: error.message 
+    });
   }
 };
