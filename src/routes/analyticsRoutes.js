@@ -3,6 +3,8 @@ const router = express.Router();
 const analyticsController = require('../controllers/analyticsController');
 
 router.get('/demographics', analyticsController.getDemographics);
+
+router.get('/search-diagnosis-family', analyticsController.searchDiagnosisByFamily);
 router.get('/location', analyticsController.getLocationStats);
 router.get('/sha', analyticsController.getSHAStats);
 router.get('/filtered', analyticsController.getFilteredStats);

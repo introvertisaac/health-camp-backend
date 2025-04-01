@@ -1168,6 +1168,7 @@ exports.getPatientsByLocation = async (req, res) => {
 };
 
 
+
 exports.searchPatientsByDiagnosis = async (req, res) => {
   try {
     const { 
@@ -1299,6 +1300,328 @@ exports.searchPatientsByDiagnosis = async (req, res) => {
       }))
     });
   } catch (error) {
+    res.status(500).json({ 
+      status: 'error', 
+      message: error.message 
+    });
+  }
+};
+
+
+exports.searchDiagnosisByFamily = async (req, res) => {
+  try {
+    const { 
+      query, 
+      limit = 10, 
+      page = 1,
+      location
+    } = req.query;
+    
+    if (!query || query.trim() === '') {
+      return res.status(400).json({ 
+        status: 'error', 
+        message: 'Search query is required' 
+      });
+    }
+    
+    // Convert page and limit to numbers
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    
+    // Build match condition
+    const matchCondition = {
+      'general_health.diagnosis': { $exists: true, $ne: null }
+    };
+    
+    if (location) {
+      matchCondition.location = location;
+    }
+    
+    // First, get the diagnosis family information
+    const diagnosisFamilyPipeline = [
+      { $match: matchCondition },
+      {
+        $project: {
+          diagnoses: {
+            $cond: {
+              if: { $isArray: "$general_health.diagnosis" },
+              then: "$general_health.diagnosis",
+              else: [{ code: "UNKNOWN", name: "$general_health.diagnosis" }]
+            }
+          }
+        }
+      },
+      { $unwind: "$diagnoses" },
+      {
+        $match: {
+          $or: [
+            { "diagnoses.code": { $regex: query, $options: "i" } },
+            { "diagnoses.name": { $regex: query, $options: "i" } }
+          ]
+        }
+      },
+      {
+        $group: {
+          _id: { 
+            // Group by the first part of the ICD code (before the first dot or first two characters)
+            familyCode: { 
+              $cond: [
+                { $regexMatch: { input: "$diagnoses.code", regex: /\./ } },
+                { $arrayElemAt: [{ $split: ["$diagnoses.code", "."] }, 0] },
+                { $substr: ["$diagnoses.code", 0, 2] }
+              ]
+            },
+            // Also consider the beginning of the diagnosis name for text searches
+            familyNameStart: { 
+              $regexMatch: { 
+                input: "$diagnoses.name", 
+                regex: new RegExp("^" + query, "i") 
+              } 
+            }
+          },
+          codes: { $addToSet: "$diagnoses.code" },
+          names: { $addToSet: "$diagnoses.name" },
+          count: { $sum: 1 },
+          patients: { $addToSet: "$_id" }
+        }
+      },
+      { $sort: { count: -1 } }
+    ];
+
+    const diagnosisFamilies = await Patient.aggregate(diagnosisFamilyPipeline);
+    
+    // Then, get the paginated patient data
+    const patientsPipeline = [
+      { $match: matchCondition },
+      {
+        $project: {
+          name: 1,
+          age: 1,
+          gender: 1,
+          patientId: 1,
+          location: 1,
+          updatedAt: 1,
+          diagnoses: {
+            $cond: {
+              if: { $isArray: "$general_health.diagnosis" },
+              then: "$general_health.diagnosis",
+              else: [{ code: "UNKNOWN", name: "$general_health.diagnosis" }]
+            }
+          }
+        }
+      },
+      {
+        $match: {
+          $or: [
+            { "diagnoses.code": { $regex: query, $options: "i" } },
+            { "diagnoses.name": { $regex: query, $options: "i" } }
+          ]
+        }
+      },
+      { $sort: { updatedAt: -1 } },
+      { $skip: (pageNum - 1) * limitNum },
+      { $limit: limitNum }
+    ];
+
+    const patients = await Patient.aggregate(patientsPipeline);
+    
+    // Count total matching patients for pagination
+    const countPipeline = [
+      { $match: matchCondition },
+      {
+        $project: {
+          diagnoses: {
+            $cond: {
+              if: { $isArray: "$general_health.diagnosis" },
+              then: "$general_health.diagnosis",
+              else: [{ code: "UNKNOWN", name: "$general_health.diagnosis" }]
+            }
+          }
+        }
+      },
+      {
+        $match: {
+          $or: [
+            { "diagnoses.code": { $regex: query, $options: "i" } },
+            { "diagnoses.name": { $regex: query, $options: "i" } }
+          ]
+        }
+      },
+      { $count: "total" }
+    ];
+
+    const countResult = await Patient.aggregate(countPipeline);
+    const totalPatients = countResult.length > 0 ? countResult[0].total : 0;
+    const totalPages = Math.ceil(totalPatients / limitNum);
+
+    // Process diagnosis families for a more comprehensive view
+    const diagnosisFamiliesProcessed = diagnosisFamilies.map(family => {
+      // Get a representative name for the family
+      let familyName = family.names[0];
+      
+      // If we have multiple names, try to find a common prefix
+      if (family.names.length > 1) {
+        // Find the most frequent word in the diagnosis names
+        const words = family.names.flatMap(name => name.toLowerCase().split(/\s+/));
+        const wordCounts = {};
+        words.forEach(word => {
+          if (word.length > 3) { // Only consider significant words
+            wordCounts[word] = (wordCounts[word] || 0) + 1;
+          }
+        });
+        
+        // Get the most common significant word
+        const mostCommonWords = Object.entries(wordCounts)
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 3)
+          .map(entry => entry[0]);
+          
+        if (mostCommonWords.length > 0) {
+          familyName = mostCommonWords.join(", ") + " related conditions";
+        }
+      }
+      
+      return {
+        familyCode: family._id.familyCode,
+        familyName: familyName,
+        count: family.count,
+        patientCount: family.patients.length,
+        specificDiagnoses: family.names.map((name, i) => ({
+          code: family.codes[i] || "Unknown",
+          name: name
+        })).slice(0, 10) // Limit to 10 specific diagnoses per family
+      };
+    });
+
+    // Get gender and age distribution for top diagnosis families
+    if (diagnosisFamiliesProcessed.length > 0) {
+      // Get the top family code
+      const topFamilyCode = diagnosisFamiliesProcessed[0].familyCode;
+      
+      // Get demographics for this family
+      const demographicsPipeline = [
+        { $match: matchCondition },
+        {
+          $project: {
+            age: 1,
+            gender: 1,
+            diagnoses: {
+              $cond: {
+                if: { $isArray: "$general_health.diagnosis" },
+                then: "$general_health.diagnosis",
+                else: [{ code: "UNKNOWN", name: "$general_health.diagnosis" }]
+              }
+            }
+          }
+        },
+        { $unwind: "$diagnoses" },
+        {
+          $match: {
+            $or: [
+              { 
+                "diagnoses.code": { 
+                  $regex: new RegExp("^" + topFamilyCode, "i") 
+                } 
+              },
+              { 
+                "diagnoses.name": { 
+                  $regex: query, 
+                  $options: "i" 
+                } 
+              }
+            ]
+          }
+        },
+        {
+          $group: {
+            _id: null,
+            maleCount: {
+              $sum: {
+                $cond: [
+                  { $regexMatch: { input: { $toLower: "$gender" }, regex: /^male/ } },
+                  1,
+                  0
+                ]
+              }
+            },
+            femaleCount: {
+              $sum: {
+                $cond: [
+                  { $regexMatch: { input: { $toLower: "$gender" }, regex: /^female/ } },
+                  1,
+                  0
+                ]
+              }
+            },
+            ageGroups: {
+              $push: {
+                $switch: {
+                  branches: [
+                    { case: { $lte: ["$age", 18] }, then: "0-18" },
+                    { case: { $lte: ["$age", 30] }, then: "19-30" },
+                    { case: { $lte: ["$age", 50] }, then: "31-50" },
+                    { case: { $lte: ["$age", 70] }, then: "51-70" }
+                  ],
+                  default: "70+"
+                }
+              }
+            }
+          }
+        }
+      ];
+      
+      const demographics = await Patient.aggregate(demographicsPipeline);
+      
+      if (demographics.length > 0) {
+        // Process age groups
+        const ageGroupCounts = {
+          "0-18": 0,
+          "19-30": 0,
+          "31-50": 0,
+          "51-70": 0,
+          "70+": 0
+        };
+        
+        demographics[0].ageGroups.forEach(ageGroup => {
+          ageGroupCounts[ageGroup] = (ageGroupCounts[ageGroup] || 0) + 1;
+        });
+        
+        // Add demographics to the response
+        diagnosisFamiliesProcessed[0].demographics = {
+          gender: {
+            male: demographics[0].maleCount,
+            female: demographics[0].femaleCount
+          },
+          ageDistribution: ageGroupCounts
+        };
+      }
+    }
+
+    res.json({
+      status: 'success',
+      query: query,
+      metadata: {
+        total_patients: totalPatients,
+        page: pageNum,
+        limit: limitNum,
+        total_pages: totalPages,
+        has_next: pageNum < totalPages,
+        has_previous: pageNum > 1
+      },
+      diagnosis_families: diagnosisFamiliesProcessed,
+      patients: patients.map(p => ({
+        id: p._id,
+        name: p.name,
+        age: p.age,
+        gender: p.gender,
+        patientId: p.patientId,
+        location: p.location,
+        diagnoses: p.diagnoses,
+        updatedAt: p.updatedAt
+      }))
+    });
+  } catch (error) {
+    console.error('Error in searchDiagnosisByFamily:', error);
     res.status(500).json({ 
       status: 'error', 
       message: error.message 
