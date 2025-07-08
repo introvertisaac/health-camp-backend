@@ -52,6 +52,304 @@ exports.getLocationStats = async (req, res) => {
   }
 };
 
+
+exports.getRadiologyStatistics = async (req, res) => {
+  try {
+    const { startDate, endDate, location, staffEmail } = req.query;
+    
+    let match = {};
+    
+    // Add date range filter if provided
+    if (startDate || endDate) {
+      match.updatedAt = {};
+      if (startDate) match.updatedAt.$gte = new Date(startDate);
+      if (endDate) match.updatedAt.$lte = new Date(endDate);
+    }
+    
+    // Add location filter if provided
+    if (location) {
+      match.location = location;
+    }
+
+    const pipeline = [
+      { $match: match },
+      {
+        $facet: {
+          // Total patients with radiology data
+          totalRadiologyTests: [
+            {
+              $match: {
+                'radiology': { $exists: true, $ne: null }
+              }
+            },
+            { $count: 'count' }
+          ],
+
+          // Tests by procedure type
+          testsByProcedure: [
+            {
+              $match: {
+                'radiology.procedure_done': { $exists: true, $ne: null }
+              }
+            },
+            {
+              $group: {
+                _id: '$radiology.procedure_done',
+                count: { $sum: 1 }
+              }
+            },
+            { $sort: { count: -1 } }
+          ],
+
+          // Tests by location (if no specific location filter)
+          testsByLocation: [
+            {
+              $match: {
+                'radiology': { $exists: true, $ne: null }
+              }
+            },
+            {
+              $group: {
+                _id: '$location',
+                count: { $sum: 1 }
+              }
+            },
+            { $sort: { count: -1 } }
+          ],
+
+          // Tests by staff if staffEmail provided
+          testsByStaff: [
+            {
+              $match: {
+                'radiology.userEmail': staffEmail || { $exists: true, $ne: null }
+              }
+            },
+            {
+              $group: {
+                _id: {
+                  email: '$radiology.userEmail',
+                  role: '$radiology.userRole'
+                },
+                count: { $sum: 1 }
+              }
+            },
+            { $sort: { count: -1 } }
+          ],
+
+          // Monthly radiology trends
+          monthlyTrends: [
+            {
+              $match: {
+                'radiology': { $exists: true, $ne: null }
+              }
+            },
+            {
+              $group: {
+                _id: {
+                  year: { $year: '$updatedAt' },
+                  month: { $month: '$updatedAt' }
+                },
+                count: { $sum: 1 }
+              }
+            },
+            { $sort: { '_id.year': 1, '_id.month': 1 } }
+          ],
+
+          // Demographics of radiology patients
+          radiologyDemographics: [
+            {
+              $match: {
+                'radiology': { $exists: true, $ne: null }
+              }
+            },
+            {
+              $group: {
+                _id: {
+                  gender: '$gender',
+                  ageGroup: {
+                    $switch: {
+                      branches: [
+                        { case: { $lte: ['$age', 18] }, then: '0-18' },
+                        { case: { $lte: ['$age', 30] }, then: '19-30' },
+                        { case: { $lte: ['$age', 50] }, then: '31-50' },
+                        { case: { $lte: ['$age', 70] }, then: '51-70' }
+                      ],
+                      default: '70+'
+                    }
+                  }
+                },
+                count: { $sum: 1 }
+              }
+            }
+          ]
+        }
+      }
+    ];
+
+    const stats = await Patient.aggregate(pipeline);
+
+    // Format age distribution for radiology patients
+    const radiologyAgeGroups = {
+      '0-18': { male: 0, female: 0 },
+      '19-30': { male: 0, female: 0 },
+      '31-50': { male: 0, female: 0 },
+      '51-70': { male: 0, female: 0 },
+      '70+': { male: 0, female: 0 }
+    };
+
+    stats[0].radiologyDemographics.forEach(({ _id, count }) => {
+      const gender = _id.gender?.toLowerCase() === 'male' ? 'male' : 'female';
+      if (radiologyAgeGroups[_id.ageGroup]) {
+        radiologyAgeGroups[_id.ageGroup][gender] = count;
+      }
+    });
+
+    // Format monthly trends
+    const monthlyTrends = stats[0].monthlyTrends.map(trend => ({
+      period: `${trend._id.year}-${String(trend._id.month).padStart(2, '0')}`,
+      count: trend.count
+    }));
+
+    // Format staff statistics
+    const staffStats = stats[0].testsByStaff.map(staff => ({
+      email: staff._id.email,
+      role: staff._id.role,
+      tests_performed: staff.count
+    }));
+
+    // Format procedure statistics
+    const procedureStats = stats[0].testsByProcedure.map(procedure => ({
+      procedure: procedure._id,
+      count: procedure.count
+    }));
+
+    const totalTests = stats[0].totalRadiologyTests[0]?.count || 0;
+
+    const response = {
+      status: 'success',
+      data: {
+        summary: {
+          total_patients_with_radiology: totalTests,
+          date_range: {
+            start: startDate || 'Not specified',
+            end: endDate || 'Not specified'
+          },
+          location: location || 'All locations'
+        },
+        procedures: {
+          by_type: procedureStats,
+          total_procedures: procedureStats.reduce((sum, proc) => sum + proc.count, 0)
+        },
+        geography: {
+          by_location: stats[0].testsByLocation.map(loc => ({
+            location: loc._id,
+            count: loc.count,
+            percentage: totalTests > 0 ? ((loc.count / totalTests) * 100).toFixed(1) + '%' : '0%'
+          }))
+        },
+        staff_performance: {
+          by_staff: staffStats,
+          total_staff: staffStats.length
+        },
+        demographics: {
+          age_gender_distribution: radiologyAgeGroups,
+          total_by_gender: {
+            male: Object.values(radiologyAgeGroups).reduce((sum, group) => sum + group.male, 0),
+            female: Object.values(radiologyAgeGroups).reduce((sum, group) => sum + group.female, 0)
+          }
+        },
+        trends: {
+          monthly: monthlyTrends,
+          average_monthly: monthlyTrends.length > 0 ? 
+            (monthlyTrends.reduce((sum, trend) => sum + trend.count, 0) / monthlyTrends.length).toFixed(1) : 0
+        }
+      }
+    };
+
+    res.json(response);
+  } catch (error) {
+    res.status(500).json({ 
+      status: 'error',
+      message: error.message 
+    });
+  }
+};
+
+exports.getRadiologyData = async (req, res) => {
+  try {
+    const { patientId, location, procedure, page = 1, limit = 10 } = req.query;
+    
+    let query = {};
+    if (patientId) query.patientId = parseInt(patientId);
+    if (location) query.location = location;
+    if (procedure) query['radiology.procedure_done'] = new RegExp(procedure, 'i');
+
+    // Add radiology field existence check
+    query['radiology'] = { $exists: true, $ne: null };
+
+    const totalRecords = await Patient.countDocuments(query);
+    const totalPages = Math.ceil(totalRecords / limit);
+
+    const radiologyData = await Patient.find(query)
+      .select({
+        name: 1,
+        patientId: 1,
+        location: 1,
+        age: 1,
+        gender: 1,
+        radiology: 1,
+        updatedAt: 1
+      })
+      .skip((page - 1) * limit)
+      .limit(limit)
+      .sort({ updatedAt: -1 });
+
+    // Transform the data to include patient details and radiology results
+    const formattedData = radiologyData.map(patient => ({
+      patient_name: patient.name,
+      patient_id: patient.patientId,
+      location: patient.location,
+      age: patient.age,
+      gender: patient.gender,
+      radiology_test: {
+        procedure_done: patient.radiology.procedure_done,
+        result_file: patient.radiology.result_file,
+        staff: {
+          email: patient.radiology.userEmail,
+          role: patient.radiology.userRole
+        }
+      },
+      test_date: patient.updatedAt
+    }));
+
+    res.json({
+      status: 'success',
+      data: {
+        radiology_tests: formattedData,
+        pagination: {
+          total_records: totalRecords,
+          total_pages: totalPages,
+          current_page: parseInt(page),
+          page_size: parseInt(limit),
+          has_next: page < totalPages,
+          has_previous: page > 1
+        },
+        filters_applied: {
+          patient_id: patientId || null,
+          location: location || null,
+          procedure: procedure || null
+        }
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ 
+      status: 'error',
+      message: error.message 
+    });
+  }
+};
+
+
 exports.getSHAStats = async (req, res) => {
   try {
     const { location } = req.query;

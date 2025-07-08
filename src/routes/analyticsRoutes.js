@@ -6,6 +6,8 @@ router.get('/demographics', analyticsController.getDemographics);
 
 router.get('/search-diagnosis-family', analyticsController.searchDiagnosisByFamily);
 router.get('/location', analyticsController.getLocationStats);
+router.get('/radiology-statistics', analyticsController.getRadiologyStatistics);
+router.get('/radiology-data', analyticsController.getRadiologyData);
 router.get('/sha', analyticsController.getSHAStats);
 router.get('/filtered', analyticsController.getFilteredStats);
 router.get('/hourly', analyticsController.getHourlyRegistrations);
